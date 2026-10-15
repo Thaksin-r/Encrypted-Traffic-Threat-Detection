@@ -1,0 +1,28 @@
+# Transparent behavioral rules. These are heuristics, not ground truth.
+rules:
+  - id: high_byte_ratio
+    description: One direction carries almost all bytes in a sizable flow
+    enabled: true
+    conditions:
+      min_total_bytes: 5000
+      max_minor_direction_ratio: 0.05
+
+  - id: short_burst_many_packets
+    description: Many packets in a very short duration
+    enabled: true
+    conditions:
+      max_duration_seconds: 0.5
+      min_total_packets: 40
+
+  - id: repeated_same_dest
+    description: Same destination seen many times in the capture (connection frequency)
+    enabled: true
+    conditions:
+      min_dest_connection_count: 8
+
+  - id: missing_tls_on_https_port
+    description: Destination port 443 but no observable TLS handshake metadata
+    enabled: true
+    conditions:
+      dest_port: 443
+      require_tls_metadata: true

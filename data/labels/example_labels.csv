@@ -1,0 +1,3 @@
+flow_id,label
+REPLACE_WITH_REAL_FLOW_ID,benign
+REPLACE_WITH_ANOTHER_FLOW_ID,suspicious

@@ -1,0 +1,25 @@
+# Copy or point ETTD_SETTINGS to a customized settings file.
+
+flow_idle_timeout_seconds: 120
+
+ml:
+  # auto | isolation_forest | random_forest
+  mode: auto
+  contamination: 0.1
+  random_state: 42
+  model_dir: data/models
+  # Relative anomaly / classifier threshold for flagging (not a calibrated probability)
+  suspicious_score_threshold: 0.55
+
+labels:
+  # Set path to enable Random Forest when the CSV validates
+  path: null
+
+threat_intelligence:
+  # When null/empty, check_threat_intelligence reports no lookup performed
+  source: null
+
+database:
+  path: data/processed/ettd.db
+
+detection_rules_path: config/detection_rules.yaml
