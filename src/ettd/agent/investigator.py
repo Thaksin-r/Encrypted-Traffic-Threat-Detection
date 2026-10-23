@@ -81,11 +81,11 @@ def investigate_flow(
     """
     settings = settings or load_settings()
     tools = InvestigationTools(repo, settings)
-    prediction = repo.get_prediction(flow_id)
-    flows = [f for f in repo.list_flows() if f["flow_id"] == flow_id]
-    if not flows:
+    flow = repo.get_flow(flow_id)
+    if not flow:
         raise ValueError(f"flow_not_found: {flow_id}")
-    capture_id = flows[0]["capture_id"]
+    capture_id = flow["capture_id"]
+    prediction = repo.get_prediction(flow_id)
 
     investigation_id = repo.create_investigation(flow_id, capture_id)
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()

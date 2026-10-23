@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from ettd.agent.investigator import investigate_flow
 from ettd.agent.tools import InvestigationTools
 from ettd.config import load_settings
@@ -90,4 +92,51 @@ def test_llm_investigate_failure_sets_status_failed(sample_pcap, tmp_path, repo,
     db_record = repo2.get_investigation(result["investigation_id"])
     assert db_record is not None
     assert db_record["status"] == "failed"
+
+
+def test_ja3_blocklist_threat_intel_match(sample_pcap, tmp_path, repo):
+    repo2, settings, _ = _seed(repo, sample_pcap, tmp_path)
+    tools = InvestigationTools(repo2, settings)
+
+    # 1. Indicator matching config/ja3_blocklist.txt
+    res = tools.check_threat_intelligence(["bca193bf3b6d2156cfbe0e6b4b306d3e"])
+    assert res["lookup_performed"] is True
+    assert len(res["matches"]) == 1
+    assert res["matches"][0]["type"] == "ja3"
+
+    # 2. Benign / unknown indicator
+    res_clean = tools.check_threat_intelligence(["00000000000000000000000000000000"])
+    assert res_clean["lookup_performed"] is True
+    assert len(res_clean["matches"]) == 0
+
+
+def test_beaconing_detection_rule(tmp_path, repo):
+    # Seed repo with beaconing flows
+    from ettd.features.extractor import flows_to_dataframe
+    from ettd.flows.builder import build_flows
+    from ettd.ingestion.pcap_reader import PacketRecord
+
+    packets = []
+    base = 1700000000.0
+    for i in range(6):
+        t = base + i * 10.0
+        packets.append(PacketRecord(t, "192.168.1.100", "198.51.100.2", 40000 + i, 443, "TCP", 60))
+
+    flows = build_flows(packets, idle_timeout_seconds=5.0)
+    df = flows_to_dataframe(flows)
+    cid = repo.create_capture("beacon_test.pcap")
+    repo.save_flows_and_features(cid, df)
+
+    settings = {
+        "detection_rules_path": str(
+            Path(__file__).resolve().parents[1] / "config" / "detection_rules.yaml"
+        ),
+        "threat_intelligence": {"source": None},
+    }
+    tools = InvestigationTools(repo, settings)
+    rule_res = tools.compare_detection_rules(df.iloc[0]["flow_id"])
+    assert "beaconing_regular_timing" in rule_res["rules_checked"]
+    matched_ids = [m["rule_id"] for m in rule_res["matched_rules"]]
+    assert "beaconing_regular_timing" in matched_ids
+
 

@@ -1,0 +1,9 @@
+# Known suspicious or malicious JA3 fingerprints (local offline blocklist)
+# Format: MD5 hash, optional comment after #
+# Do not do network lookups
+
+# Emotet / TrickBot / Cobalt Strike common JA3s (lab reference)
+72c589327861c830f63073b304de519e
+bca193bf3b6d2156cfbe0e6b4b306d3e
+6734f37431670b3ab4292b8f60f29984
+a0e9f5d64349fb13191bc781f81f42e1

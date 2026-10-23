@@ -37,12 +37,16 @@ FEATURE_COLUMNS = [
     "fwd_bwd_byte_ratio",
     "dest_connection_count",
     "src_connection_count",
+    "beacon_gap_mean",
+    "beacon_gap_cv",
+    "beacon_flow_count",
     "tls_present",
     "tls_version",
     "tls_sni",
     "tls_alpn",
     "tls_cipher_suite_count",
     "tls_cipher_suites_missing",
+    "tls_ja3",
 ]
 
 
@@ -64,9 +68,25 @@ def extract_features(flows: list[Flow], flow_id_prefix: str = "flow") -> list[di
     """Extract features; missing TLS fields become None (unavailable)."""
     dest_counts: dict[str, int] = {}
     src_counts: dict[str, int] = {}
+    pair_times: dict[tuple[str, str], list[float]] = {}
     for f in flows:
         dest_counts[f.dst_ip] = dest_counts.get(f.dst_ip, 0) + 1
         src_counts[f.src_ip] = src_counts.get(f.src_ip, 0) + 1
+        pair_times.setdefault((f.src_ip, f.dst_ip), []).append(f.start_time)
+
+    beacon_stats: dict[tuple[str, str], tuple[float, float, int]] = {}
+    for pair, times in pair_times.items():
+        sorted_times = sorted(times)
+        n_flows = len(sorted_times)
+        if len(sorted_times) >= 2:
+            gaps = [sorted_times[i] - sorted_times[i - 1] for i in range(1, len(sorted_times))]
+            mean_gap = float(np.mean(gaps))
+            std_gap = float(np.std(gaps, ddof=0))
+            cv_gap = float(std_gap / mean_gap) if mean_gap > 1e-6 else 0.0
+        else:
+            mean_gap = 0.0
+            cv_gap = 0.0
+        beacon_stats[pair] = (mean_gap, cv_gap, n_flows)
 
     rows: list[dict[str, Any]] = []
     for idx, flow in enumerate(flows):
@@ -82,6 +102,9 @@ def extract_features(flows: list[Flow], flow_id_prefix: str = "flow") -> list[di
         bps = float(total_bytes / duration) if duration > 0 else float(total_bytes)
         pps = float(total_packets / duration) if duration > 0 else float(total_packets)
         ratio = float(flow.fwd_bytes / flow.bwd_bytes) if flow.bwd_bytes > 0 else float(flow.fwd_bytes)
+
+        pair = (flow.src_ip, flow.dst_ip)
+        bg_mean, bg_cv, bg_count = beacon_stats.get(pair, (0.0, 0.0, 1))
 
         tls = flow.tls_meta or {}
         cipher_suites = tls.get("tls_cipher_suites")
@@ -116,12 +139,16 @@ def extract_features(flows: list[Flow], flow_id_prefix: str = "flow") -> list[di
                 "fwd_bwd_byte_ratio": ratio,
                 "dest_connection_count": dest_counts.get(flow.dst_ip, 1),
                 "src_connection_count": src_counts.get(flow.src_ip, 1),
+                "beacon_gap_mean": bg_mean,
+                "beacon_gap_cv": bg_cv,
+                "beacon_flow_count": bg_count,
                 "tls_present": bool(tls.get("tls_present", False)),
                 "tls_version": tls.get("tls_version"),
                 "tls_sni": tls.get("tls_sni"),
                 "tls_alpn": ",".join(alpn) if isinstance(alpn, list) else alpn,
                 "tls_cipher_suite_count": len(cipher_suites) if isinstance(cipher_suites, list) else None,
                 "tls_cipher_suites_missing": bool(cipher_suites is None),
+                "tls_ja3": tls.get("tls_ja3"),
             }
         )
     return rows

@@ -59,6 +59,7 @@ class InvestigationTools:
             "tls_sni": field("tls_sni"),
             "tls_alpn": field("tls_alpn"),
             "tls_cipher_suite_count": field("tls_cipher_suite_count"),
+            "tls_ja3": field("tls_ja3"),
             "limitations": (
                 "Only cleartext handshake observables are considered. "
                 "Encrypted application data is never decrypted."
@@ -71,11 +72,8 @@ class InvestigationTools:
         if features is None:
             return {"error": "flow_not_found", "flow_id": flow_id}
 
-        capture_id = None
-        for flow in self.repo.list_flows():
-            if flow["flow_id"] == flow_id:
-                capture_id = flow["capture_id"]
-                break
+        target_flow = self.repo.get_flow(flow_id)
+        capture_id = target_flow.get("capture_id") if target_flow else None
         candidates = self.repo.list_flows(capture_id)
         related = []
         for flow in candidates:
@@ -163,6 +161,16 @@ class InvestigationTools:
                 hit = dport == int(cond.get("dest_port", 443)) and (not tls) and bool(
                     cond.get("require_tls_metadata", True)
                 )
+            elif rid == "beaconing_regular_timing":
+                b_count = int(features.get("beacon_flow_count") or 0)
+                b_cv = float(features.get("beacon_gap_cv") if features.get("beacon_gap_cv") is not None else 1.0)
+                b_mean = float(features.get("beacon_gap_mean") or 0.0)
+                detail = {"beacon_flow_count": b_count, "beacon_gap_cv": b_cv, "beacon_gap_mean": b_mean}
+                hit = (
+                    b_count >= int(cond.get("min_flow_count", 5))
+                    and b_cv <= float(cond.get("max_gap_cv", 0.25))
+                    and b_mean > 0.0
+                )
 
             if hit:
                 matched.append(
@@ -189,21 +197,70 @@ class InvestigationTools:
         for ind in indicators[:50]:
             if not isinstance(ind, str) or len(ind) > 256:
                 raise ValueError("each indicator must be a string <= 256 chars")
-            # Strip control chars; treat as untrusted
             cleaned.append(ind.strip()[:256])
+
+        matches = []
+        ja3_blocklist_path = PROJECT_ROOT / "config" / "ja3_blocklist.txt"
+        ja3_candidates = [
+            ind for ind in cleaned
+            if len(ind) == 32 and all(c in "0123456789abcdefABCDEF" for c in ind)
+        ]
+        ja3_lookup_performed = False
+
+        if ja3_blocklist_path.exists() and ja3_candidates:
+            ja3_lookup_performed = True
+            try:
+                blocked_hashes = set()
+                for line in ja3_blocklist_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        token = line.split("#")[0].strip().lower()
+                        if token:
+                            blocked_hashes.add(token)
+                for ind in ja3_candidates:
+                    if ind.lower() in blocked_hashes:
+                        matches.append(
+                            {
+                                "indicator": ind,
+                                "type": "ja3",
+                                "matched": True,
+                                "source": "config/ja3_blocklist.txt",
+                                "description": "Matched local JA3 blocklist entry",
+                            }
+                        )
+            except Exception:
+                pass
 
         source = self.settings.get("threat_intelligence", {}).get("source")
         if not source:
+            if matches:
+                return {
+                    "lookup_performed": True,
+                    "reason": "matched local JA3 blocklist; no external network lookups performed",
+                    "indicators": cleaned,
+                    "matches": matches,
+                }
+            if ja3_lookup_performed:
+                return {
+                    "lookup_performed": True,
+                    "reason": "checked local JA3 blocklist (no matches); no external network lookups performed",
+                    "indicators": cleaned,
+                    "matches": [],
+                }
             return {
                 "lookup_performed": False,
                 "reason": "no threat intelligence source configured",
                 "indicators": cleaned,
                 "matches": [],
             }
-        # Intentionally no automatic external lookups in MVP without explicit config wiring.
+
         return {
-            "lookup_performed": False,
-            "reason": f"source '{source}' is configured but no connector is implemented in MVP",
+            "lookup_performed": bool(matches) or bool(source) or ja3_lookup_performed,
+            "reason": (
+                "checked local JA3 blocklist and external source configured"
+                if matches
+                else f"source '{source}' is configured but no external connector is implemented"
+            ),
             "indicators": cleaned,
-            "matches": [],
+            "matches": matches,
         }

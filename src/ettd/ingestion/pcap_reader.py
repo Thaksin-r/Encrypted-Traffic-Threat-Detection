@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import hashlib
 from scapy.all import IP, IPv6, TCP, UDP, load_layer, rdpcap  # type: ignore[attr-defined]
 
 try:
@@ -15,6 +16,45 @@ try:
 except Exception:
     TLS = None  # type: ignore
     TLSClientHello = None  # type: ignore
+
+
+_GREASE_TABLE = {
+    0x0A0A, 0x1A1A, 0x2A2A, 0x3A3A, 0x4A4A, 0x5A5A, 0x6A6A, 0x7A7A,
+    0x8A8A, 0x9A9A, 0xAAAA, 0xBABA, 0xCACA, 0xDADA, 0xEAEA, 0xFAFA,
+}
+
+
+def compute_ja3(ch: Any) -> str | None:
+    """Compute JA3 fingerprint hash from TLS ClientHello."""
+    if ch is None:
+        return None
+    try:
+        version = str(int(getattr(ch, "version", 0)))
+        ciphers = getattr(ch, "ciphers", []) or []
+        cipher_str = "-".join(str(int(c)) for c in ciphers if int(c) not in _GREASE_TABLE)
+
+        exts = getattr(ch, "ext", []) or []
+        ext_types: list[str] = []
+        curves: list[str] = []
+        ec_formats: list[str] = []
+
+        for e in exts:
+            etype = getattr(e, "type", None)
+            if etype is not None and int(etype) not in _GREASE_TABLE:
+                ext_types.append(str(int(etype)))
+            if hasattr(e, "groups") and e.groups:
+                curves.extend(str(int(g)) for g in e.groups if int(g) not in _GREASE_TABLE)
+            if hasattr(e, "ecpl") and e.ecpl:
+                ec_formats.extend(str(int(p)) for p in e.ecpl if int(p) not in _GREASE_TABLE)
+
+        ext_str = "-".join(ext_types)
+        curve_str = "-".join(curves)
+        ec_str = "-".join(ec_formats)
+
+        raw_ja3 = f"{version},{cipher_str},{ext_str},{curve_str},{ec_str}"
+        return hashlib.md5(raw_ja3.encode("utf-8")).hexdigest()
+    except Exception:
+        return None
 
 
 @dataclass
@@ -61,6 +101,8 @@ def _extract_tls_handshake_meta(pkt: Any) -> dict[str, Any]:
     ch = tls_layer.getlayer(TLSClientHello)
     if ch is None:
         return meta
+
+    meta["tls_ja3"] = compute_ja3(ch)
 
     # Version / cipher suites when exposed by Scapy
     if hasattr(ch, "version") and ch.version is not None:

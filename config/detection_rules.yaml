@@ -26,3 +26,10 @@ rules:
     conditions:
       dest_port: 443
       require_tls_metadata: true
+
+  - id: beaconing_regular_timing
+    description: Regular interval between connections to same destination (potential C2 beaconing)
+    enabled: true
+    conditions:
+      min_flow_count: 5
+      max_gap_cv: 0.25

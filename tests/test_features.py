@@ -1,6 +1,6 @@
 from ettd.features.extractor import FEATURE_COLUMNS, flows_to_dataframe
 from ettd.flows.builder import build_flows
-from ettd.ingestion.pcap_reader import read_pcap
+from ettd.ingestion.pcap_reader import PacketRecord, read_pcap
 
 
 def test_feature_columns_present(sample_pcap):
@@ -50,3 +50,25 @@ def test_no_payload_bytes_in_features(sample_pcap):
     assert "xxxxx" not in blob
     assert "payload" not in df.columns
     assert "raw" not in df.columns
+
+
+def test_beaconing_features_calculation():
+    # 6 flows with exact 10-second intervals between 10.0.0.5 and 10.0.0.99
+    packets = []
+    base = 1700000000.0
+    for i in range(6):
+        t = base + i * 10.0
+        packets.append(PacketRecord(t, "10.0.0.5", "10.0.0.99", 50000 + i, 443, "TCP", 64))
+
+    flows = build_flows(packets, idle_timeout_seconds=5.0)
+    assert len(flows) == 6
+    df = flows_to_dataframe(flows)
+    assert "beacon_gap_mean" in df.columns
+    assert "beacon_gap_cv" in df.columns
+    assert "beacon_flow_count" in df.columns
+
+    for _, row in df.iterrows():
+        assert row["beacon_flow_count"] == 6
+        assert abs(row["beacon_gap_mean"] - 10.0) < 1e-3
+        assert row["beacon_gap_cv"] < 0.01  # extremely regular, CV near 0
+
