@@ -29,6 +29,7 @@ class PacketRecord:
     protocol: str
     length: int
     tls_meta: dict[str, Any] = field(default_factory=dict)
+    tcp_flags: str = ""
 
 
 def _extract_tls_handshake_meta(pkt: Any) -> dict[str, Any]:
@@ -116,9 +117,11 @@ def read_pcap(pcap_path: str | Path) -> list[PacketRecord]:
         else:
             continue
 
+        tcp_flags = ""
         if pkt.haslayer(TCP):
             l4 = pkt[TCP]
             protocol = "TCP"
+            tcp_flags = str(l4.flags)
         elif pkt.haslayer(UDP):
             l4 = pkt[UDP]
             protocol = "UDP"
@@ -138,6 +141,7 @@ def read_pcap(pcap_path: str | Path) -> list[PacketRecord]:
                 protocol=protocol,
                 length=length,
                 tls_meta=tls_meta,
+                tcp_flags=tcp_flags,
             )
         )
     return records
