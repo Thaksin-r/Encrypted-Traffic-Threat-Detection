@@ -68,3 +68,26 @@ def test_investigate_without_api_key_fails_clearly(sample_pcap, tmp_path, repo, 
     assert result["status"] == "failed"
     assert result["report"] is None
     assert "OPENAI_API_KEY" in result["error"]
+
+
+def test_llm_investigate_failure_sets_status_failed(sample_pcap, tmp_path, repo, monkeypatch):
+    import ettd.agent.investigator as inv_mod
+
+    repo2, settings, df = _seed(repo, sample_pcap, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-key-for-test")
+
+    def _failing_llm(*args, **kwargs):
+        raise RuntimeError("OpenAI connection timeout")
+
+    monkeypatch.setattr(inv_mod, "_llm_investigate", _failing_llm)
+
+    flow_id = df.iloc[0]["flow_id"]
+    result = inv_mod.investigate_flow(flow_id, repo2, settings, use_llm=True)
+    assert result["status"] == "failed"
+    assert "OpenAI connection timeout" in result["error"]
+
+    # Check database status was updated and did not get stuck on 'pending'
+    db_record = repo2.get_investigation(result["investigation_id"])
+    assert db_record is not None
+    assert db_record["status"] == "failed"
+

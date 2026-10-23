@@ -130,7 +130,26 @@ def investigate_flow(
             "llm_used": False,
         }
 
-    tool_calls, report = _llm_investigate(flow_id, tools, prediction)
+    try:
+        tool_calls, report = _llm_investigate(flow_id, tools, prediction)
+    except Exception as exc:
+        logger.exception("LLM investigation failed: %s", exc)
+        err_msg = str(exc)
+        repo.update_investigation(
+            investigation_id,
+            status="failed",
+            report={"error": err_msg, "llm_used": True},
+            tool_calls=[],
+        )
+        return {
+            "investigation_id": investigation_id,
+            "status": "failed",
+            "error": err_msg,
+            "tool_calls": [],
+            "report": None,
+            "llm_used": True,
+        }
+
     missing = validate_report(report)
     if missing:
         fallback = build_report_from_tool_results(flow_id, tool_calls, prediction)
