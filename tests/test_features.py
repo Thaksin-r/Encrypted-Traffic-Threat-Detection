@@ -31,6 +31,15 @@ def test_missing_tls_fields_are_nullish(sample_pcap):
     assert set(df["tls_present"].unique()).issubset({False, True})
     # SNI should be null/None for non-TLS synthetic packets
     assert df["tls_sni"].isna().all() or (df["tls_sni"] == None).all()  # noqa: E711
+    assert "tls_cipher_suites_missing" in df.columns
+    assert df["tls_cipher_suites_missing"].all()
+
+    from ettd.ml.features_matrix import build_matrix
+
+    mat, cols = build_matrix(df)
+    assert "tls_cipher_suites_missing" in cols
+    idx = cols.index("tls_cipher_suites_missing")
+    assert (mat[:, idx] == 1.0).all()
 
 
 def test_no_payload_bytes_in_features(sample_pcap):

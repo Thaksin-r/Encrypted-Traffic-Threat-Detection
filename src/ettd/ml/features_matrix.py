@@ -28,16 +28,26 @@ NUMERIC_FEATURE_COLUMNS = [
     "src_connection_count",
     "tls_present",
     "tls_cipher_suite_count",
+    "tls_cipher_suites_missing",
 ]
 
 
 def build_matrix(df: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
-    cols = [c for c in NUMERIC_FEATURE_COLUMNS if c in df.columns]
-    frame = df[cols].copy()
-    if "tls_present" in frame.columns:
-        frame["tls_present"] = frame["tls_present"].astype(float)
-    frame = frame.apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    return frame.to_numpy(dtype=float), cols
+    frame = df.copy()
+    if "tls_cipher_suites_missing" not in frame.columns:
+        if "tls_cipher_suite_count" in frame.columns:
+            frame["tls_cipher_suites_missing"] = frame["tls_cipher_suite_count"].isna().astype(float)
+        else:
+            frame["tls_cipher_suites_missing"] = 1.0
+
+    cols = [c for c in NUMERIC_FEATURE_COLUMNS if c in frame.columns]
+    mat = frame[cols].copy()
+    if "tls_present" in mat.columns:
+        mat["tls_present"] = mat["tls_present"].astype(float)
+    if "tls_cipher_suites_missing" in mat.columns:
+        mat["tls_cipher_suites_missing"] = mat["tls_cipher_suites_missing"].astype(float)
+    mat = mat.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    return mat.to_numpy(dtype=float), cols
 
 
 def group_ids(df: pd.DataFrame) -> pd.Series:

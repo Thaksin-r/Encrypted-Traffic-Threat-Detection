@@ -42,6 +42,7 @@ FEATURE_COLUMNS = [
     "tls_sni",
     "tls_alpn",
     "tls_cipher_suite_count",
+    "tls_cipher_suites_missing",
 ]
 
 
@@ -120,6 +121,7 @@ def extract_features(flows: list[Flow], flow_id_prefix: str = "flow") -> list[di
                 "tls_sni": tls.get("tls_sni"),
                 "tls_alpn": ",".join(alpn) if isinstance(alpn, list) else alpn,
                 "tls_cipher_suite_count": len(cipher_suites) if isinstance(cipher_suites, list) else None,
+                "tls_cipher_suites_missing": bool(cipher_suites is None),
             }
         )
     return rows
