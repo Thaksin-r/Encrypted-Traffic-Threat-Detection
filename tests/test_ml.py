@@ -82,3 +82,58 @@ def test_evaluate_binary():
     assert "precision" in metrics
     assert "false_positive_rate" in metrics
     assert metrics["confusion_matrix"]["fp"] == 1
+
+
+def test_isolation_forest_uniform_flows_contamination_level(tmp_path):
+    import numpy as np
+    import pytest
+    from ettd.ml.train import train_model
+
+    rng = np.random.RandomState(42)
+    n = 40
+    data = {
+        "flow_id": [f"f_{i:03d}" for i in range(n)],
+        "duration": rng.normal(1.0, 0.01, n),
+        "total_packets": rng.normal(10, 0.2, n),
+        "total_bytes": rng.normal(1000, 10, n),
+        "fwd_packets": rng.normal(5, 0.1, n),
+        "bwd_packets": rng.normal(5, 0.1, n),
+        "fwd_bytes": rng.normal(500, 5, n),
+        "bwd_bytes": rng.normal(500, 5, n),
+        "pkt_len_mean": rng.normal(100, 1, n),
+        "iat_mean": rng.normal(0.1, 0.001, n),
+        "bytes_per_second": rng.normal(1000, 10, n),
+        "packets_per_second": rng.normal(10, 0.2, n),
+        "fwd_bwd_byte_ratio": rng.normal(1.0, 0.01, n),
+        "dest_connection_count": [1] * n,
+        "src_connection_count": [1] * n,
+        "tls_present": [False] * n,
+        "tls_cipher_suite_count": [None] * n,
+        "tls_cipher_suites_missing": [True] * n,
+    }
+    df = pd.DataFrame(data)
+    model_dir = tmp_path / "models"
+    settings = {
+        "ml": {
+            "mode": "isolation_forest",
+            "model_dir": str(model_dir),
+            "random_state": 42,
+            "contamination": 0.1,
+            "suspicious_score_threshold": 0.55,
+        },
+        "labels": {"path": None},
+    }
+
+    # Before training, detect_suspicious with retrain=False must raise FileNotFoundError
+    with pytest.raises(FileNotFoundError):
+        detect_suspicious(df, settings, retrain=False)
+
+    meta = train_model(df, settings, model_dir=model_dir)
+    assert meta["threshold"] == 0.0
+    assert (model_dir / "latest.json").exists()
+
+    preds = detect_suspicious(df, settings, retrain=False)
+    assert len(preds) == n
+    suspicious_count = sum(1 for p in preds if p["label"] == "suspicious")
+    # Exactly contamination level (0.1 * 40 = 4) or fewer, NOT 11
+    assert suspicious_count <= 4

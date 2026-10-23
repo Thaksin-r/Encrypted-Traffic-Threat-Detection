@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -10,26 +11,38 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from ettd.ml.features_matrix import NUMERIC_FEATURE_COLUMNS, build_matrix
+from ettd.ml.features_matrix import NUMERIC_FEATURE_COLUMNS
 from ettd.ml.train import train_model
 
 logger = logging.getLogger(__name__)
 
 
-def _model_path(settings: dict[str, Any]) -> Path:
+def _resolve_model_and_meta(settings: dict[str, Any]) -> tuple[Path, Path]:
     from ettd.config import PROJECT_ROOT
 
     model_dir = Path(settings.get("ml", {}).get("model_dir", "data/models"))
     if not model_dir.is_absolute():
         model_dir = PROJECT_ROOT / model_dir
-    return model_dir / "model.joblib"
+
+    latest_json = model_dir / "latest.json"
+    if latest_json.exists():
+        try:
+            info = json.loads(latest_json.read_text(encoding="utf-8"))
+            m_path = Path(info.get("model_file", ""))
+            meta_path = Path(info.get("meta_file", ""))
+            if m_path.exists():
+                return m_path, meta_path
+        except Exception:
+            pass
+
+    return model_dir / "model.joblib", model_dir / "model_meta.json"
 
 
 def detect_suspicious(
     features_df: pd.DataFrame,
     settings: dict[str, Any],
     *,
-    retrain: bool = True,
+    retrain: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Return per-flow predictions.
@@ -39,15 +52,22 @@ def detect_suspicious(
     if features_df.empty:
         return []
 
-    model_file = _model_path(settings)
-    if retrain or not model_file.exists():
+    model_file, meta_path = _resolve_model_and_meta(settings)
+    if retrain:
         meta = train_model(features_df, settings)
-        mode = meta["mode"]
+        model_file, meta_path = _resolve_model_and_meta(settings)
+        mode = meta.get("mode", "isolation_forest")
+    elif not model_file.exists():
+        raise FileNotFoundError(
+            f"No trained model found at {model_file}. Train a model first using POST /train."
+        )
     else:
-        import json
-
-        meta_path = model_file.parent / "model_meta.json"
-        mode = json.loads(meta_path.read_text(encoding="utf-8")).get("mode", "isolation_forest")
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            mode = meta.get("mode", "isolation_forest")
+        else:
+            meta = {}
+            mode = "isolation_forest"
 
     artifact = joblib.load(model_file)
     model = artifact["model"]
@@ -59,57 +79,63 @@ def detect_suspicious(
     for c in cols:
         if c not in frame.columns:
             frame[c] = 0.0
-    X, _ = build_matrix(frame[cols] if set(cols).issubset(frame.columns) else frame)
-    # Rebuild with exact training columns
+
     mat = frame[cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     if "tls_present" in mat.columns:
         mat["tls_present"] = mat["tls_present"].astype(float)
+    if "tls_cipher_suites_missing" in mat.columns:
+        mat["tls_cipher_suites_missing"] = mat["tls_cipher_suites_missing"].astype(float)
     Xs = scaler.transform(mat.to_numpy(dtype=float))
 
-    threshold = float(settings.get("ml", {}).get("suspicious_score_threshold", 0.55))
     results: list[dict[str, Any]] = []
 
     if mode == "isolation_forest" or model.__class__.__name__ == "IsolationForest":
-        # decision_function: higher = more normal; invert to anomaly score in [0,1]-ish rank
+        # decision_function: higher = more normal; < 0 is anomalous
         raw = model.decision_function(Xs)
-        # Map so higher means more anomalous
-        anomaly = -raw
-        # Min-max within batch for dashboard ranking (still not calibrated)
-        amin, amax = float(anomaly.min()), float(anomaly.max())
-        if amax - amin < 1e-9:
-            scores = np.zeros_like(anomaly)
+        threshold = float(meta.get("threshold", 0.0))
+        if hasattr(model, "score_samples"):
+            scores = -model.score_samples(Xs)
         else:
-            scores = (anomaly - amin) / (amax - amin)
+            scores = -raw
         preds = model.predict(Xs)  # -1 anomaly, 1 normal
         for i, flow_id in enumerate(features_df["flow_id"].tolist()):
             score = float(scores[i])
-            label = "suspicious" if preds[i] == -1 or score >= threshold else "benign"
+            label = "suspicious" if (preds[i] == -1 or raw[i] < threshold) else "benign"
             results.append(
                 {
                     "flow_id": flow_id,
                     "label": label,
                     "score": score,
                     "model_mode": "isolation_forest",
-                    "score_note": "batch-normalized anomaly rank; not a calibrated probability",
+                    "score_note": "anomaly score (unsupervised); not a calibrated probability",
                 }
             )
     else:
+        threshold = float(meta.get("threshold", settings.get("ml", {}).get("suspicious_score_threshold", 0.55)))
         if hasattr(model, "predict_proba"):
             scores = model.predict_proba(Xs)[:, 1]
         else:
             scores = model.predict(Xs).astype(float)
         labels = model.predict(Xs)
+        train_flow_ids = set(artifact.get("train_flow_ids", []))
         for i, flow_id in enumerate(features_df["flow_id"].tolist()):
             score = float(scores[i])
             pred = int(labels[i])
-            label = "suspicious" if pred == 1 or score >= threshold else "benign"
+            label = "suspicious" if (pred == 1 or score >= threshold) else "benign"
+            is_training_row = flow_id in train_flow_ids
+            score_note = (
+                "classifier score on training row (not an out-of-sample test evaluation)"
+                if is_training_row
+                else "classifier score / vote fraction; not a calibrated probability"
+            )
             results.append(
                 {
                     "flow_id": flow_id,
                     "label": label,
                     "score": score,
                     "model_mode": "random_forest",
-                    "score_note": "classifier score / vote fraction; not a calibrated probability",
+                    "is_training_row": is_training_row,
+                    "score_note": score_note,
                 }
             )
 

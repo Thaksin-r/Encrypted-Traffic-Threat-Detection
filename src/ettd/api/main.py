@@ -13,6 +13,7 @@ from ettd.agent.investigator import investigate_flow
 from ettd.config import PROJECT_ROOT, db_path, load_settings
 from ettd.db.repository import Repository
 from ettd.ml.infer import detect_suspicious
+from ettd.ml.train import train_model
 from ettd.pipeline_extract import extract_from_pcap
 
 app = FastAPI(
@@ -31,9 +32,13 @@ class InvestigateRequest(BaseModel):
     use_llm: bool = True
 
 
+class TrainRequest(BaseModel):
+    capture_id: str | None = None
+
+
 class DetectRequest(BaseModel):
     capture_id: str | None = None
-    retrain: bool = True
+    retrain: bool = False
 
 
 @app.get("/health")
@@ -102,18 +107,47 @@ def get_flow(flow_id: str) -> dict[str, Any]:
     }
 
 
-@app.post("/detect")
-def run_detect(body: DetectRequest) -> dict[str, Any]:
+@app.post("/train")
+def run_train(body: TrainRequest | None = None) -> dict[str, Any]:
     settings = load_settings()
     repo = get_repo()
-    df = repo.get_features_dataframe(body.capture_id)
+    capture_id = body.capture_id if body else None
+    df = repo.get_features_dataframe(capture_id)
     if df.empty:
         raise HTTPException(status_code=400, detail="No features available; extract a PCAP first")
-    preds = detect_suspicious(df, settings, retrain=body.retrain)
+    try:
+        meta = train_model(df, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "status": "trained",
+        "version": meta.get("version"),
+        "mode": meta.get("mode"),
+        "algorithm": meta.get("algorithm"),
+        "n_samples": meta.get("n_samples"),
+        "meta": meta,
+    }
+
+
+@app.post("/detect")
+def run_detect(body: DetectRequest | None = None) -> dict[str, Any]:
+    settings = load_settings()
+    repo = get_repo()
+    capture_id = body.capture_id if body else None
+    df = repo.get_features_dataframe(capture_id)
+    if df.empty:
+        raise HTTPException(status_code=400, detail="No features available; extract a PCAP first")
+    try:
+        preds = detect_suspicious(df, settings, retrain=False)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="No trained model found. Please train a model first using POST /train.",
+        ) from exc
     # Group by capture from features
-    if body.capture_id:
-        repo.save_predictions(body.capture_id, preds)
-        capture_ids = [body.capture_id]
+    if capture_id:
+        repo.save_predictions(capture_id, preds)
+        capture_ids = [capture_id]
     else:
         # Save per flow's capture
         flow_cap = {f["flow_id"]: f["capture_id"] for f in repo.list_flows()}

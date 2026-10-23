@@ -56,7 +56,18 @@ def test_extract_detect_investigate_flow(client, tmp_path):
     body = r.json()
     assert body["flow_count"] >= 1
 
-    r = client.post("/detect", json={"retrain": True})
+    # /detect without a trained model must fail clearly with 400
+    r_err = client.post("/detect", json={})
+    assert r_err.status_code == 400, r_err.text
+    assert "No trained model found" in r_err.json()["detail"]
+
+    # Train model
+    r_train = client.post("/train", json={})
+    assert r_train.status_code == 200, r_train.text
+    assert r_train.json()["status"] == "trained"
+
+    # Now /detect loads the trained model
+    r = client.post("/detect", json={})
     assert r.status_code == 200, r.text
     preds = r.json()["predictions"]
     assert preds
