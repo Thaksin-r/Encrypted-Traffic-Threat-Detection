@@ -6,7 +6,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from scapy.all import IP, IPv6, TCP, UDP, rdpcap  # type: ignore[attr-defined]
+from scapy.all import IP, IPv6, TCP, UDP, load_layer, rdpcap  # type: ignore[attr-defined]
+
+try:
+    load_layer("tls")
+    from scapy.layers.tls.handshake import TLSClientHello  # type: ignore
+    from scapy.layers.tls.record import TLS  # type: ignore
+except Exception:
+    TLS = None  # type: ignore
+    TLSClientHello = None  # type: ignore
 
 
 @dataclass
@@ -31,18 +39,25 @@ def _extract_tls_handshake_meta(pkt: Any) -> dict[str, Any]:
     feature extraction maps them to explicit unavailable/null values.
     """
     meta: dict[str, Any] = {}
-    # Prefer scapy TLS layers when available; otherwise skip.
-    try:
-        from scapy.layers.tls.handshake import TLSClientHello  # type: ignore
-        from scapy.layers.tls.record import TLS  # type: ignore
-    except Exception:
+    if TLS is None:
         return meta
 
-    if not pkt.haslayer(TLS):
+    tls_layer = None
+    if pkt.haslayer(TLS):
+        tls_layer = pkt.getlayer(TLS)
+    elif pkt.haslayer(TCP):
+        raw_payload = bytes(pkt[TCP].payload)
+        if len(raw_payload) >= 2 and raw_payload[0] == 0x16 and raw_payload[1] == 0x03:
+            try:
+                tls_layer = TLS(raw_payload)
+            except Exception:
+                tls_layer = None
+
+    if tls_layer is None:
         return meta
 
     meta["tls_present"] = True
-    ch = pkt.getlayer(TLSClientHello)
+    ch = tls_layer.getlayer(TLSClientHello)
     if ch is None:
         return meta
 
