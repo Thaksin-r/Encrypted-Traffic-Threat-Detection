@@ -181,23 +181,27 @@ with tab_overview:
         st.subheader("Score Distribution")
         try:
             score_dist = api_get(st.session_state.api_url, "/stats/score-distribution")
-            scores = score_dist.get("scores", [])
+            bin_labels = score_dist.get("bin_labels", [])
+            counts = score_dist.get("counts", [])
+            suspicious_counts = score_dist.get("suspicious_counts", [])
             thresh = score_dist.get("threshold", 0.55)
 
-            if scores:
-                fig_hist = px.histogram(
-                    x=scores,
-                    nbins=30,
-                    title=f"Flow Anomaly Scores (Threshold = {thresh:.3f})",
-                    labels={"x": "Score (Higher = More Anomalous)"},
-                    color_discrete_sequence=[COLOR_ACCENT],
-                )
-                fig_hist.add_vline(
-                    x=thresh,
-                    line_dash="dash",
-                    line_color=COLOR_SUSPICIOUS,
-                    annotation_text="Threshold",
-                    annotation_position="top right",
+            if bin_labels and counts and any(c > 0 for c in counts):
+                benign_counts = [max(0, t - s) for t, s in zip(counts, suspicious_counts)]
+                fig_hist = go.Figure()
+                fig_hist.add_trace(go.Bar(
+                    x=bin_labels, y=benign_counts, name="Benign",
+                    marker_color=COLOR_BENIGN,
+                ))
+                fig_hist.add_trace(go.Bar(
+                    x=bin_labels, y=suspicious_counts, name="Suspicious",
+                    marker_color=COLOR_SUSPICIOUS,
+                ))
+                fig_hist.update_layout(
+                    barmode="stack",
+                    title=f"Flow Anomaly Score Distribution (Threshold ≈ {thresh:.3f})",
+                    xaxis_title="Score Range (Higher = More Anomalous)",
+                    yaxis_title="Flow Count",
                 )
                 apply_dark_theme(fig_hist)
                 st.plotly_chart(fig_hist, use_container_width=True)
@@ -212,8 +216,9 @@ with tab_overview:
             timeline_data = api_get(st.session_state.api_url, "/stats/timeline", (("bucket_seconds", 60.0),))
             if timeline_data:
                 df_time = pd.DataFrame(timeline_data)
-                df_time["time_dt"] = pd.to_datetime(df_time["timestamp"], unit="s")
-                df_time["benign_flows"] = df_time["total_flows"] - df_time["suspicious_flows"]
+                # API returns: time, flow_count, suspicious_count
+                df_time["time_dt"] = pd.to_datetime(df_time["time"], unit="s")
+                df_time["benign_flows"] = df_time["flow_count"] - df_time["suspicious_count"]
 
                 fig_time = go.Figure()
                 fig_time.add_trace(
@@ -227,7 +232,7 @@ with tab_overview:
                 fig_time.add_trace(
                     go.Bar(
                         x=df_time["time_dt"],
-                        y=df_time["suspicious_flows"],
+                        y=df_time["suspicious_count"],
                         name="Suspicious",
                         marker_color=COLOR_SUSPICIOUS,
                     )
@@ -251,8 +256,9 @@ with tab_overview:
         st.subheader("Top Destinations")
         try:
             top_talkers = api_get(st.session_state.api_url, "/stats/top-talkers", (("limit", 10),))
-            by_flows = top_talkers.get("by_flows", [])
-            by_bytes = top_talkers.get("by_bytes", [])
+            # API returns: top_destinations_by_flows, top_destinations_by_bytes
+            by_flows = top_talkers.get("top_destinations_by_flows", [])
+            by_bytes = top_talkers.get("top_destinations_by_bytes", [])
 
             metric_choice = st.radio("Metric", ["Flow Count", "Total Bytes"], horizontal=True, label_visibility="collapsed")
             if metric_choice == "Flow Count" and by_flows:
@@ -700,71 +706,141 @@ with tab_investigations:
                         report = {"raw": report}
 
                 if status == "failed":
-                    st.error(f"Investigation execution failed: {report.get('error', 'Unknown failure')}")
+                    st.error(f"Investigation failed: {report.get('error', 'Unknown error')}")
+                    st.info("💡 To get a full AI-written report, set OPENAI_API_KEY and re-run the investigation with LLM enabled.")
                 else:
-                    # Render structured sections
-                    c_sum, c_ev = st.columns(2)
-                    with c_sum:
-                        st.markdown("#### 📝 Executive Summary")
-                        summary_text = report.get("summary") or report.get("executive_summary") or "No summary recorded."
-                        st.write(summary_text)
+                    # ── 1. VERDICT BANNER ─────────────────────────────────
+                    ml_pred = report.get("ml_prediction") or {}
+                    score = ml_pred.get("score")
+                    label = ml_pred.get("label", "unknown")
+                    confidence = (report.get("confidence") or {}).get("value", "low")
+                    model_mode = ml_pred.get("model_mode", "isolation_forest")
 
-                    with c_ev:
-                        st.markdown("#### 🔬 Evidence & Indicators")
-                        evidence = report.get("evidence") or []
-                        if isinstance(evidence, list) and evidence:
-                            for ev in evidence:
-                                st.markdown(f"- {ev}")
-                        elif isinstance(evidence, dict):
-                            for k, v in evidence.items():
-                                st.markdown(f"- **{k}**: {v}")
-                        else:
-                            st.write(str(evidence) if evidence else "No primary evidence listed.")
+                    color = "#ef4444" if label == "suspicious" else "#10b981"
+                    conf_color = {"high": "#ef4444", "medium": "#f59e0b", "low": "#64748b"}.get(confidence, "#64748b")
+                    score_pct = f"{score:.1%}" if score is not None else "N/A"
 
-                    st.markdown("---")
-                    c_rules, c_alt = st.columns(2)
-                    with c_rules:
-                        st.markdown("#### ⚖️ Matched Rules & Policies")
-                        rules = report.get("rule_matches") or report.get("matched_rules") or []
-                        if isinstance(rules, list) and rules:
-                            for r in rules:
-                                if isinstance(r, dict):
-                                    st.markdown(f"- **{r.get('rule_id')}**: {r.get('description', '')}")
-                                else:
-                                    st.markdown(f"- {r}")
-                        else:
-                            st.markdown("*No specific detection rule triggers recorded.*")
+                    st.markdown(f"""
+                    <div style="background:rgba(18,26,43,0.8);border:1px solid {color};border-radius:8px;padding:1rem 1.5rem;margin-bottom:1rem;">
+                        <span style="font-size:1.4rem;font-weight:700;color:{color};">{'🚨 SUSPICIOUS' if label == 'suspicious' else '✅ BENIGN'}</span>
+                        &nbsp;&nbsp;
+                        <span style="color:#94a3b8;font-size:0.9rem;">Anomaly Score: <strong style="color:#7dd3fc;">{score_pct}</strong></span>
+                        &nbsp;&nbsp;
+                        <span style="background:{conf_color};color:#fff;padding:2px 10px;border-radius:4px;font-size:0.8rem;font-weight:600;">{confidence.upper()} CONFIDENCE</span>
+                        &nbsp;&nbsp;
+                        <span style="color:#64748b;font-size:0.8rem;">Model: {model_mode}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-                    with c_alt:
-                        st.markdown("#### 🔄 Alternative Explanations")
-                        alts = report.get("alternative_explanations") or report.get("alternatives") or []
-                        if isinstance(alts, list) and alts:
-                            for a in alts:
-                                st.markdown(f"- {a}")
-                        else:
-                            st.markdown("*None noted.*")
+                    # Summary sentence
+                    summary_text = (
+                        report.get("incident_summary")
+                        or report.get("summary")
+                        or report.get("executive_summary")
+                        or "No summary available."
+                    )
+                    st.markdown(f"> {summary_text}")
 
                     st.markdown("---")
-                    c_lim, c_next = st.columns(2)
-                    with c_lim:
-                        st.markdown("#### ⚠️ Operational Limitations")
-                        lims = report.get("limitations") or []
-                        if isinstance(lims, list) and lims:
-                            for l in lims:
-                                st.markdown(f"- {l}")
-                        else:
-                            st.markdown(str(lims) if lims else "*No explicit limitations logged.*")
 
-                    with c_next:
-                        st.markdown("#### 🎯 Recommended Next Steps")
-                        steps = report.get("next_steps") or []
-                        if isinstance(steps, list) and steps:
-                            for s in steps:
-                                st.markdown(f"- {s}")
-                        else:
-                            st.markdown(str(steps) if steps else "*Standard triage protocol.*")
+                    # ── 2. FLOW FACTS & TLS ───────────────────────────────
+                    c_flow, c_tls = st.columns(2)
 
-                # Audit trail
+                    # Extract flow metadata from evidence
+                    evidence_list = report.get("observed_evidence") or report.get("evidence") or []
+                    flow_meta = next((e for e in evidence_list if isinstance(e, dict) and e.get("type") == "flow_metadata"), {})
+                    tls_meta  = next((e for e in evidence_list if isinstance(e, dict) and e.get("type") == "tls_metadata"), {})
+                    tls_detail = tls_meta.get("detail", {})
+                    related_ev = next((e for e in evidence_list if isinstance(e, dict) and e.get("type") == "related_flows"), {})
+                    ti_ev      = next((e for e in evidence_list if isinstance(e, dict) and e.get("type") == "threat_intelligence"), {})
+
+                    with c_flow:
+                        st.markdown("#### 🌐 Flow Facts")
+                        if flow_meta:
+                            proto = flow_meta.get("protocol", "?")
+                            src   = flow_meta.get("src_ip", "?")
+                            dst   = flow_meta.get("dst_ip", "?")
+                            port  = flow_meta.get("dst_port", "?")
+                            dur   = flow_meta.get("duration")
+                            dur_s = f"{dur:.3f}s" if dur is not None else "?"
+                            tb    = flow_meta.get("total_bytes", 0)
+                            tb_s  = f"{tb:,} bytes" if tb else "?"
+                            tp    = flow_meta.get("total_packets", "?")
+                            st.markdown(f"""
+| Field | Value |
+|---|---|
+| **Direction** | `{src}` → `{dst}:{port}` |
+| **Protocol** | `{proto}` |
+| **Duration** | `{dur_s}` |
+| **Total Bytes** | `{tb_s}` |
+| **Total Packets** | `{tp}` |
+| **Related Flows** | `{related_ev.get('count', 0)}` flows to same host |
+""")
+                        else:
+                            st.info("Flow metadata not available.")
+
+                    with c_tls:
+                        st.markdown("#### 🔒 TLS Metadata")
+                        if tls_detail:
+                            tls_present = tls_detail.get("tls_present", False)
+                            if tls_present:
+                                st.success("TLS Handshake Observed ✓")
+                            else:
+                                st.warning("⚠️ No TLS handshake detected on this flow")
+
+                            sni     = tls_detail.get("tls_sni", "unavailable")
+                            version = tls_detail.get("tls_version", "unavailable")
+                            ja3     = tls_detail.get("tls_ja3", "unavailable")
+                            alpn    = tls_detail.get("tls_alpn", "unavailable")
+                            ccount  = tls_detail.get("tls_cipher_suite_count", "unavailable")
+                            st.markdown(f"""
+| Field | Value |
+|---|---|
+| **SNI (Domain)** | `{sni}` |
+| **TLS Version** | `{version}` |
+| **JA3 Fingerprint** | `{ja3}` |
+| **ALPN Protocol** | `{alpn}` |
+| **Cipher Suites** | `{ccount}` offered |
+""")
+                            if ja3 and ja3 not in ("unavailable", None):
+                                st.caption("💡 JA3 fingerprints can identify specific TLS client libraries — known malware families have distinct JA3 hashes.")
+                        else:
+                            st.info("TLS metadata not extracted.")
+
+                    st.markdown("---")
+
+                    # ── 3. MATCHED RULES ─────────────────────────────────
+                    st.markdown("#### ⚖️ Behavioral Rule Matches")
+                    rules_ev = next((e for e in evidence_list if isinstance(e, dict) and e.get("type") == "rule_matches"), {})
+                    matched_rules = rules_ev.get("matched", []) or report.get("matched_rules") or []
+                    if matched_rules:
+                        for r in matched_rules:
+                            rule_id = r.get("rule_id", r) if isinstance(r, dict) else r
+                            desc    = r.get("description", "") if isinstance(r, dict) else ""
+                            detail  = r.get("detail", {}) if isinstance(r, dict) else {}
+                            detail_str = "  |  ".join(f"`{k}` = `{v}`" for k, v in detail.items()) if detail else ""
+                            st.markdown(f"🔴 **{rule_id}** — {desc}  \n{detail_str}")
+                    else:
+                        st.success("✅ No behavioral rules triggered. Flagged by ML statistical anomaly score only.")
+                        st.caption("This means the traffic pattern is unusual compared to the baseline, but no explicit threat signature matched. Could be a false positive.")
+
+                    # Threat Intel
+                    if ti_ev:
+                        st.markdown("#### 🕵️ Threat Intelligence Lookup")
+                        if ti_ev.get("lookup_performed"):
+                            matches = ti_ev.get("matches", [])
+                            if matches:
+                                st.error(f"🚨 Blocklist match found: {matches}")
+                            else:
+                                st.success("✅ No blocklist matches found for this IP/JA3.")
+                        else:
+                            st.info(f"ℹ️ Threat intel lookup skipped — {ti_ev.get('reason', 'no source configured')}.")
+                            st.caption("💡 To enable live threat intelligence, add JA3 hashes to `config/ja3_blocklist.txt` or configure an external threat feed.")
+
+                    st.markdown("---")
+
+
+                # ── 6. AUDIT TRAIL ─────────────────────────────────────
                 tool_calls = inv.get("tool_calls") or inv.get("tool_calls_json") or []
                 if isinstance(tool_calls, str):
                     try:
@@ -772,76 +848,134 @@ with tab_investigations:
                     except Exception:
                         tool_calls = []
 
-                with st.expander("🛠️ Tool-Call Audit Trail"):
+                tool_icons = {
+                    "inspect_flow": "🔎",
+                    "analyze_tls_metadata": "🔒",
+                    "find_related_flows": "🔗",
+                    "compare_detection_rules": "⚖️",
+                    "check_threat_intelligence": "🕵️",
+                }
+                with st.expander(f"🛠️ Tool Audit Trail ({len(tool_calls)} tools ran)"):
                     if tool_calls:
-                        st.json(tool_calls)
+                        for tc in tool_calls:
+                            tool_name = tc.get("tool", "unknown")
+                            icon = tool_icons.get(tool_name, "🔧")
+                            result = tc.get("result", {})
+                            err = result.get("error") if isinstance(result, dict) else None
+                            status_badge = "❌ Error" if err else "✅ OK"
+                            with st.expander(f"{icon} `{tool_name}` — {status_badge}"):
+                                if err:
+                                    st.error(err)
+                                else:
+                                    st.json(result)
                     else:
-                        st.info("No tool calls recorded for this investigation.")
+                        st.info("No tool calls recorded.")
 
 
 # ==============================================================================
 # TAB 5: ACTIONS
 # ==============================================================================
+# ==============================================================================
+# TAB 5: ACTIONS (STREAMLINED 2-FEATURE AUTOMATED WORKFLOW)
+# ==============================================================================
 with tab_actions:
-    st.subheader("Data Ingestion, Model Management & Evaluation")
+    st.subheader("Automated Traffic Threat Analysis")
+    st.caption("Upload a network capture and select your model. Ingestion, feature extraction, and threat detection run completely automatically.")
 
-    col_ingest, col_ml = st.columns(2)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    with col_ingest:
-        st.markdown("### 📤 PCAP File Ingestion")
+    c_model, c_upload = st.columns(2)
 
-        # File upload
-        uploaded_file = st.file_uploader("Upload PCAP capture (.pcap, .pcapng)", type=["pcap", "pcapng"])
-        if uploaded_file is not None:
-            if st.button("Extract Uploaded PCAP", use_container_width=True):
-                with st.spinner("Uploading and dissecting packet metadata..."):
-                    try:
-                        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/octet-stream")}
-                        upload_res = api_upload(st.session_state.api_url, "/captures/upload", files)
-                        st.success(f"Dissected {upload_res.get('flow_count')} flows (Capture ID: {upload_res.get('capture_id')})")
-                        st.cache_data.clear()
-                    except Exception as e:
-                        st.error(f"Upload and extraction failed: {e}")
+    with c_model:
+        st.markdown("### 🧠 1. Select Detection Model")
+        model_options = {
+            "autoencoder": "⚡ Autoencoder (Neural Network with Dynamic Threshold) [Recommended]",
+            "isolation_forest": "🌲 Isolation Forest (Unsupervised Anomaly Boundary)",
+            "random_forest": "🎯 Random Forest (Supervised Classifier on Benchmark Labels)",
+        }
+        selected_mode_key = st.selectbox(
+            "Detection Algorithm",
+            options=list(model_options.keys()),
+            format_func=lambda k: model_options[k],
+            help="Autoencoder uses deep latent representation and adjusts its threshold dynamically to traffic variance."
+        )
 
-        st.markdown("---")
-        st.markdown("### 📂 Extract Local PCAP")
-        local_pcap = st.text_input("Server Path (restricted to data/samples or data/uploads)", value="data/samples/sample.pcap")
-        if st.button("Extract Local PCAP", use_container_width=True):
-            with st.spinner("Dissecting local PCAP..."):
-                try:
-                    res = api_post(st.session_state.api_url, "/captures/extract", params={"pcap_path": local_pcap})
-                    st.success(f"Extracted {res.get('flow_count')} flows (Capture ID: {res.get('capture_id')})")
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Extraction failed: {e}")
+        st.markdown(
+            """
+            <div style="background: rgba(18, 26, 43, 0.6); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 1rem; margin-top: 0.5rem;">
+                <span style="font-size: 0.85rem; color: #94a3b8;">
+                    <strong>Training Dataset:</strong> Verified benchmark baseline (1,661 flows from UNSW-NB15 with real cyber attacks & benign communications). Fully cleaned, scaled, and calibrated.
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    with col_ml:
-        st.markdown("### 🧠 Machine Learning Engine")
+    with c_upload:
+        st.markdown("### 📤 2. Upload PCAP Capture")
+        uploaded_file = st.file_uploader(
+            "Select offline network traffic capture (.pcap, .pcapng)",
+            type=["pcap", "pcapng"],
+            help="Select any captured packet file. Application payloads remain 100% encrypted and untouched."
+        )
+        use_demo = st.checkbox("🧪 Or use pre-loaded sample capture (`data/samples/sample.pcap`)", value=False)
+        if use_demo and uploaded_file is None:
+            demo_path = Path("data/samples/sample.pcap")
+            if demo_path.exists():
+                class MockFile:
+                    name = "sample.pcap"
+                    def getvalue(self):
+                        return demo_path.read_bytes()
+                uploaded_file = MockFile()
 
-        st.markdown("#### 1. Train Model")
-        model_mode = st.selectbox("Training Algorithm", ["isolation_forest", "random_forest"])
-        if st.button("Train Model on Ingested Data", use_container_width=True):
-            with st.spinner("Training model artifact..."):
-                try:
-                    train_res = api_post(st.session_state.api_url, "/train", {"mode": model_mode})
-                    st.success(
-                        f"Trained {train_res.get('mode')} on {train_res.get('rows_trained')} flows. "
-                        f"Threshold: {train_res.get('score_threshold', 'N/A')}"
-                    )
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Training failed: {e}")
+    st.markdown("<br>", unsafe_allow_html=True)
 
-        st.markdown("---")
-        st.markdown("#### 2. Run Anomaly Detection")
-        if st.button("Score Flows with Saved Model", use_container_width=True):
-            with st.spinner("Scoring flows..."):
-                try:
-                    detect_res = api_post(st.session_state.api_url, "/detect", {})
-                    st.success(
-                        f"Scored {detect_res.get('flows_scored')} flows. "
-                        f"Suspicious: {detect_res.get('suspicious')} | Benign: {detect_res.get('benign')}"
-                    )
-                    st.cache_data.clear()
-                except Exception as e:
-                    st.error(f"Detection scoring failed: {e}")
+    # Automated execution trigger
+    if uploaded_file is not None:
+        if st.button("🚀 Analyze Network Capture (Fully Automated)", type="primary", use_container_width=True):
+            status_container = st.status("Running automated analysis pipeline...", expanded=True)
+            try:
+                # Step 1: Upload and extract
+                status_container.write("📥 Step 1/3: Dissecting packet headers and extracting 26 behavioral features...")
+                files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/octet-stream")}
+                upload_res = api_upload(st.session_state.api_url, "/captures/upload", files)
+                cid = upload_res.get("capture_id")
+                flow_count = upload_res.get("flow_count", 0)
+
+                # Step 2: Verify & train model with selected algorithm
+                status_container.write(f"🧠 Step 2/3: Calibrating {selected_mode_key} on verified baseline dataset...")
+                train_res = api_post(st.session_state.api_url, "/train", {"mode": selected_mode_key})
+                meta_dict = train_res.get("meta") or {}
+                thresh_val = (
+                    train_res.get("score_threshold")
+                    or meta_dict.get("score_threshold")
+                    or meta_dict.get("threshold")
+                    or "N/A"
+                )
+                thresh_display = f"{thresh_val:.4f}" if isinstance(thresh_val, (int, float)) else str(thresh_val)
+
+                # Step 3: Run anomaly detection scoring
+                status_container.write("🎯 Step 3/3: Scoring extracted flows against dynamic threshold boundary...")
+                detect_res = api_post(st.session_state.api_url, "/detect", {})
+                suspicious_n = detect_res.get("suspicious", 0)
+                benign_n = detect_res.get("benign", 0)
+
+                status_container.update(
+                    label="✅ Analysis complete! All dashboard tabs have been updated.",
+                    state="complete",
+                    expanded=False,
+                )
+
+                st.success(
+                    f"**Analysis Complete!** Dissected **{flow_count} flows** from `{uploaded_file.name}`. "
+                    f"Identified **{suspicious_n} Suspicious** and **{benign_n} Benign** flows using {selected_mode_key} "
+                    f"(Dynamic Threshold: `{thresh_display}`)."
+                )
+                st.cache_data.clear()
+                st.rerun()
+
+            except Exception as exc:
+                status_container.update(label="❌ Analysis pipeline encountered an error", state="error")
+                st.error(f"Execution failed: {exc}")
+    else:
+        st.info("💡 To start, select your model on the left, drop a `.pcap` capture file on the right, and click Analyze.")

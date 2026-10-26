@@ -88,6 +88,7 @@ class InvestigateRequest(BaseModel):
 
 class TrainRequest(BaseModel):
     capture_id: str | None = None
+    mode: str | None = None
 
 
 class DetectRequest(BaseModel):
@@ -146,6 +147,14 @@ def extract_local(pcap_path: str = Query(..., description="Path to offline PCAP"
     return {"capture_id": cid, "flow_count": len(df)}
 
 
+@app.post("/captures/ingest-unsw")
+def ingest_unsw(samples: int = Query(1500, ge=100, le=5000)) -> dict[str, Any]:
+    """Download and ingest benchmark network threat flows from UNSW-NB15."""
+    from ettd.dataset_ingest import download_and_ingest_unsw
+    settings = load_settings()
+    return download_and_ingest_unsw(num_samples=samples, settings=settings)
+
+
 @app.get("/flows")
 def list_flows(
     capture_id: str | None = None,
@@ -192,6 +201,8 @@ def get_flow(flow_id: str) -> dict[str, Any]:
 @app.post("/train")
 def run_train(body: TrainRequest | None = None) -> dict[str, Any]:
     settings = load_settings()
+    if body and body.mode:
+        settings.setdefault("ml", {})["mode"] = body.mode
     repo = get_repo()
     capture_id = body.capture_id if body else None
     df = repo.get_features_dataframe(capture_id)
@@ -207,6 +218,7 @@ def run_train(body: TrainRequest | None = None) -> dict[str, Any]:
         "mode": meta.get("mode"),
         "algorithm": meta.get("algorithm"),
         "n_samples": meta.get("n_samples"),
+        "score_threshold": meta.get("score_threshold", meta.get("threshold")),
         "meta": meta,
     }
 
@@ -307,6 +319,21 @@ def explain_flow(flow_id: str) -> dict[str, Any]:
                     "score": round(float(abs_z[idx]), 4),
                 }
             )
+    elif mode == "autoencoder" or model.__class__.__name__ == "MLPRegressor":
+        xs_val = scaler.transform(vals_arr.reshape(1, -1))
+        recon = model.predict(xs_val)
+        recon_diff = np.square(xs_val[0] - recon[0])
+        top_indices = np.argsort(recon_diff)[::-1][:5]
+        for idx in top_indices:
+            explained_features.append(
+                {
+                    "feature": cols[idx],
+                    "value": round(float(vals_arr[idx]), 4),
+                    "mean": round(float(means[idx]), 4),
+                    "z_score": round(float(recon_diff[idx]), 4),
+                    "score": round(float(recon_diff[idx]), 4),
+                }
+            )
     else:
         importances = getattr(model, "feature_importances_", np.ones_like(vals_arr))
         scores = importances * abs_z
@@ -377,3 +404,9 @@ def get_investigation(investigation_id: str) -> dict[str, Any]:
     if not inv:
         raise HTTPException(status_code=404, detail="investigation not found")
     return inv
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("ettd.api.main:app", host="127.0.0.1", port=8000, reload=True)

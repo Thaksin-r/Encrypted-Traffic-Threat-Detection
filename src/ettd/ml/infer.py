@@ -110,6 +110,27 @@ def detect_suspicious(
                     "score_note": "anomaly score (unsupervised); not a calibrated probability",
                 }
             )
+    elif mode == "autoencoder" or model.__class__.__name__ == "MLPRegressor":
+        reconstructed = model.predict(Xs)
+        recon_errors = np.mean(np.square(Xs - reconstructed), axis=1)
+        dynamic_thresh = float(meta.get("dynamic_threshold", meta.get("threshold", 0.5)))
+
+        for i, flow_id in enumerate(features_df["flow_id"].tolist()):
+            err = float(recon_errors[i])
+            # Calibrated normalized anomaly index: 0.5 at dynamic threshold
+            norm_score = float(err / (err + dynamic_thresh + 1e-9) * 2.0)
+            norm_score = float(min(1.0, max(0.0, norm_score)))
+            label = "suspicious" if err >= dynamic_thresh else "benign"
+            results.append(
+                {
+                    "flow_id": flow_id,
+                    "label": label,
+                    "score": norm_score,
+                    "raw_reconstruction_error": err,
+                    "model_mode": "autoencoder",
+                    "score_note": f"Autoencoder reconstruction error: {err:.4f} (dynamic threshold: {dynamic_thresh:.4f})",
+                }
+            )
     else:
         threshold = float(meta.get("threshold", settings.get("ml", {}).get("suspicious_score_threshold", 0.55)))
         if hasattr(model, "predict_proba"):

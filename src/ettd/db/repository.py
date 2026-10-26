@@ -39,7 +39,7 @@ class Repository:
         with self._connect() as conn:
             with conn:
                 conn.execute(
-                    "INSERT INTO captures (capture_id, source_path, created_at, flow_count) VALUES (?, ?, ?, 0)",
+                    "INSERT OR REPLACE INTO captures (capture_id, source_path, created_at, flow_count) VALUES (?, ?, ?, 0)",
                     (cid, source_path, _utc_now()),
                 )
         return cid

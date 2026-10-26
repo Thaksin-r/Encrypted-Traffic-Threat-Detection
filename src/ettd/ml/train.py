@@ -81,6 +81,74 @@ def train_model(
         }
         joblib.dump(artifact, version_dir / "model.joblib")
         joblib.dump(artifact, out_dir / "model.joblib")
+    elif mode == "autoencoder":
+        from sklearn.neural_network import MLPRegressor
+
+        scaler = StandardScaler()
+        Xs = scaler.fit_transform(X)
+        input_dim = Xs.shape[1]
+        
+        # Symmetrical Bottleneck Architecture
+        hidden = (
+            max(8, min(32, input_dim // 2)),
+            max(4, min(16, input_dim // 4)),
+            max(8, min(32, input_dim // 2)),
+        )
+        
+        model = MLPRegressor(
+            hidden_layer_sizes=hidden,
+            activation="relu",
+            solver="adam",
+            max_iter=300,
+            random_state=int(ml_cfg.get("random_state", 42)),
+            learning_rate_init=0.01,
+            early_stopping=True,
+            n_iter_no_change=10,
+        )
+        model.fit(Xs, Xs)  # Reconstruct input features
+        
+        reconstructed = model.predict(Xs)
+        recon_errors = np.mean(np.square(Xs - reconstructed), axis=1)
+        
+        mean_err = float(np.mean(recon_errors))
+        std_err = float(np.std(recon_errors, ddof=0))
+        p90 = float(np.percentile(recon_errors, 90))
+        p95 = float(np.percentile(recon_errors, 95))
+        p99 = float(np.percentile(recon_errors, 99))
+        
+        contamination = float(ml_cfg.get("contamination", 0.1))
+        # Dynamic Threshold Adjustment: statistical calibration to feature variance
+        percentile_thresh = float(np.percentile(recon_errors, 100 * (1.0 - contamination)))
+        gaussian_thresh = float(mean_err + 2.0 * std_err)
+        dynamic_threshold = float(min(percentile_thresh, gaussian_thresh) if gaussian_thresh > mean_err else percentile_thresh)
+        
+        meta["algorithm"] = "Autoencoder (Neural Network)"
+        meta["architecture"] = f"Input({input_dim}) -> Layer({hidden[0]}) -> LatentBottleneck({hidden[1]}) -> Layer({hidden[2]}) -> Reconstructed({input_dim})"
+        meta["threshold"] = dynamic_threshold
+        meta["score_threshold"] = dynamic_threshold
+        meta["dynamic_threshold"] = dynamic_threshold
+        meta["reconstruction_error_mean"] = mean_err
+        meta["reconstruction_error_std"] = std_err
+        meta["dynamic_adjustment"] = {
+            "strategy": "Adaptive Empirical Percentile + 2-Sigma Boundary",
+            "mean_error": mean_err,
+            "std_error": std_err,
+            "p90": p90,
+            "p95": p95,
+            "p99": p99,
+            "calibrated_threshold": dynamic_threshold,
+        }
+        
+        artifact = {
+            "model": model,
+            "scaler": scaler,
+            "columns": cols,
+            "version": version,
+            "mode": mode,
+            "dynamic_threshold": dynamic_threshold,
+        }
+        joblib.dump(artifact, version_dir / "model.joblib")
+        joblib.dump(artifact, out_dir / "model.joblib")
     else:
         assert labels_df is not None
         merged = features_df.merge(labels_df[["flow_id", "label"]], on="flow_id", how="inner")

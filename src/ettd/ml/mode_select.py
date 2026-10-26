@@ -65,6 +65,9 @@ def select_model_mode(settings: dict) -> tuple[str, pd.DataFrame | None, str]:
     if configured == "isolation_forest":
         logger.info("ML mode forced: isolation_forest (%s)", reason)
         return "isolation_forest", None, f"forced isolation_forest; labels: {reason}"
+    if configured == "autoencoder":
+        logger.info("ML mode forced: autoencoder")
+        return "autoencoder", None, "forced autoencoder with dynamic threshold adjustment"
     if configured == "random_forest":
         if not ok:
             raise ValueError(f"random_forest requested but labels invalid: {reason}")
