@@ -106,6 +106,20 @@ def summary() -> dict[str, Any]:
     return get_repo().summary_counts()
 
 
+@app.post("/admin/reset")
+def reset_database() -> dict[str, str]:
+    """Wipe all flows, features, predictions, and investigations from DB."""
+    repo = get_repo()
+    with repo._connect() as conn:
+        with conn:
+            conn.execute("DELETE FROM investigations")
+            conn.execute("DELETE FROM predictions")
+            conn.execute("DELETE FROM features")
+            conn.execute("DELETE FROM flows")
+            conn.execute("DELETE FROM captures")
+    return {"status": "cleared", "message": "All analyzed flows removed."}
+
+
 @app.get("/captures")
 def list_captures() -> list[dict[str, Any]]:
     return get_repo().list_captures()

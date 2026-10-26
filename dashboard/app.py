@@ -139,6 +139,15 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
+    if st.button("🗑️ Clear All Analyzed Flows", use_container_width=True):
+        try:
+            api_post(st.session_state.api_url, "/admin/reset", {})
+            st.success("All flows and data cleared!")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Clear failed: {e}")
+
     st.markdown("---")
     st.markdown("### Operational Guardrails")
     st.markdown("- **Zero Decryption:** Payload contents are strictly ignored.")
